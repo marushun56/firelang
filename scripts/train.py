@@ -565,7 +565,7 @@ def parse_arguments():
     parser.add_argument("--cpu", action="store_true", help="Use cpu rather than CUDA.")
     parser.add_argument("--savedir", type=str, default="./results/")
     parser.add_argument(
-        "--plot_words", type=list, default=["bank", "river", "financial"]
+        "--plot_words", type=list, default=["cat", "happy", "car"]
     )
     parser.add_argument(
         "--benchmarks",
