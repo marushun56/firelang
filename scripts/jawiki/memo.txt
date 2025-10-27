@@ -1,0 +1,8 @@
+# mecabrcファイルを作成
+cat > ~/.mecabrc << 'EOF'
+dicdir = /home/maruyama/.pyenv/versions/env1/lib/python3.8/site-packages/unidic_lite/dicdir
+EOF
+
+# 環境変数を設定して実行
+export MECABRC=~/.mecabrc
+bash scripts/jawiki/2_tokenize.sh

@@ -12,3 +12,8 @@ rich
 typing_extensions
 matplotlib
 wandb
+mecab-python3
+janome
+neologdn
+wikiextractor
+unidic-lite
