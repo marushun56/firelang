@@ -12,6 +12,6 @@ python -m scripts.train \
     --seed=0 \
     --accum_steps=10 \
     --func='MLPlanarDivFast(dim, 4).neg()' \
-    --measure='DiracMixture(dim, 10)' \
+    --measure='DiracMixture(dim, 1)' \
     --weight_decay=1e-6 \
     --use_wandb
