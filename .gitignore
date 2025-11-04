@@ -21,6 +21,7 @@ corpusit/
 /legacy
 /firelang_legacy
 /checkpoints
+logs/
 
 
 # Byte-compiled / optimized / DLL files

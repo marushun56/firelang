@@ -135,6 +135,7 @@ class WordInContextBenchmark:
 """ -------------------- word similarity --------------------"""
 
 DEFAULT_WORDSIM_DIR = "data/word-similarity/monolingual/en"
+DEFAULT_WORDSIM_DIR_JA = "data/word-similarity/monolingual/ja"  # 追加
 
 ALL_WORDSIM_BENCHMARKS = [
     "mc-30",
@@ -151,6 +152,12 @@ ALL_WORDSIM_BENCHMARKS = [
     "yp-130",
 ]
 
+ALL_WORDSIM_BENCHMARKS_JA = [
+    "score_adj_ja",
+    "score_adv_ja",
+    "score_noun_ja",
+    "score_verb_ja",
+]
 
 def load_word_benchmark(
     name, dirpath=DEFAULT_WORDSIM_DIR, lower=True, tokenizer: Callable = lambda x: [x]
@@ -182,6 +189,28 @@ def load_word_benchmark(
         dataset = pd.read_csv(f"{dirpath}/wordsim353-sim.csv", index_col=0).dropna()
     elif name == "yp-130":
         dataset = pd.read_csv(f"{dirpath}/yp-130.csv", index_col=0).dropna()
+    # 日本語ベンチマーク追加
+    elif name == "score_adj_ja":
+        dataset = pd.read_csv(f"{dirpath}/score_adj.csv").dropna()
+        # カラム名を統一し、スコアを0~1に正規化
+        dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
+        dataset.columns = ["word1", "word2", "similarity"]
+        dataset["similarity"] = dataset["similarity"] / 10.0
+    elif name == "score_adv_ja":
+        dataset = pd.read_csv(f"{dirpath}/score_adv.csv").dropna()
+        dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
+        dataset.columns = ["word1", "word2", "similarity"]
+        dataset["similarity"] = dataset["similarity"] / 10.0
+    elif name == "score_noun_ja":
+        dataset = pd.read_csv(f"{dirpath}/score_noun.csv").dropna()
+        dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
+        dataset.columns = ["word1", "word2", "similarity"]
+        dataset["similarity"] = dataset["similarity"] / 10.0
+    elif name == "score_verb_ja":
+        dataset = pd.read_csv(f"{dirpath}/score_verb.csv").dropna()
+        dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
+        dataset.columns = ["word1", "word2", "similarity"]
+        dataset["similarity"] = dataset["similarity"] / 10.0    
     else:
         return NotImplementedError
 
@@ -205,6 +234,12 @@ def load_all_word_benchmarks(dirpath=DEFAULT_WORDSIM_DIR, lower=True):
         benchmarks[bname] = load_word_benchmark(bname, dirpath=dirpath, lower=lower)
     return benchmarks
 
+# 日本語ベンチマーク用の関数追加
+def load_all_word_benchmarks_ja(dirpath=DEFAULT_WORDSIM_DIR_JA, lower=True, tokenizer: Callable = lambda x: [x]):
+    benchmarks = {}
+    for bname in ALL_WORDSIM_BENCHMARKS_JA:
+        benchmarks[bname] = load_word_benchmark(bname, dirpath=dirpath, lower=lower, tokenizer=tokenizer)
+    return benchmarks
 
 _cache = defaultdict(dict)
 

@@ -21,8 +21,12 @@ from firelang.utils.log import logger
 from firelang.utils.timer import elapsed, Timer
 from scripts.benchmark import (
     SimilarityBenchmark,
+    SimilarityBenchmark,
     ALL_WORDSIM_BENCHMARKS,
+    ALL_WORDSIM_BENCHMARKS_JA,
     load_word_benchmark,
+    load_all_word_benchmarks,
+    load_all_word_benchmarks_ja,
     benchmark_word_similarity,
 )
 from scripts.dataloader import DataLoader
@@ -597,6 +601,8 @@ def parse_arguments():
         help="Load a pre-trained FIRE from wandb, by its ID (e.g., allen/firelang/abcdefghi)",
     )
     parser.add_argument("--tag", type=str, default=None)
+    parser.add_argument("--lang", type=str, default="en", choices=["en", "ja"],
+                        help="Language for benchmarking")
 
     args = parser.parse_args()
 
