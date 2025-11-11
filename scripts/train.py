@@ -9,6 +9,7 @@ import random
 import json
 import matplotlib
 import matplotlib.pyplot as plt
+import japanize_matplotlib
 import numpy as np
 import torch
 from torch.optim import AdamW, Adam, SGD, Adagrad
@@ -176,21 +177,54 @@ def train(args):
     logger.info(f"  Optimizer: {optimizer}")
     logger.info(f"  Scheduler: {scheduler}")
 
-    benchmarks = ALL_WORDSIM_BENCHMARKS if args.benchmarks == "*" else args.benchmarks
-    for bname in benchmarks:
-        assert bname in ALL_WORDSIM_BENCHMARKS, f"benchmark {bname} not defined."
-    benchmarks: SimilarityBenchmark = {
-        bname: load_word_benchmark(bname, lower=args.benchmark_lower)
-        for bname in benchmarks
-    }
-
-    if args.profile:
-        prof = torch.autograd.profiler.profile(use_cuda=True)
+    # ベンチマークの選択
+    if args.lang == "en":
+        benchmark_list = ALL_WORDSIM_BENCHMARKS
+        load_benchmarks_func = load_all_word_benchmarks
+        benchmark_kwargs = {"lower": args.benchmark_lower}
+    elif args.lang == "ja":
+        benchmark_list = ALL_WORDSIM_BENCHMARKS_JA
+        load_benchmarks_func = load_all_word_benchmarks_ja
+        # 日本語の場合はコーパスと同じトークナイザーを使う
+        try:
+            import MeCab
+            tagger = MeCab.Tagger("-Owakati")
+            def ja_tokenizer(text):
+                return tagger.parse(text).strip().split()
+        except ImportError:
+            logger.warning("MeCab not available, using character-level tokenization")
+            def ja_tokenizer(text):
+                return list(text)
+        benchmark_kwargs = {"lower": args.benchmark_lower, "tokenizer": ja_tokenizer}
+    elif args.lang == "both":
+        benchmark_list = ALL_WORDSIM_BENCHMARKS + ALL_WORDSIM_BENCHMARKS_JA
+        # 両方のベンチマークをロード
+        benchmarks_en = load_all_word_benchmarks(lower=args.benchmark_lower)
+        def simple_tokenizer(text):
+            return [text]
+        benchmarks_ja = load_all_word_benchmarks_ja(
+            lower=args.benchmark_lower, 
+            tokenizer=simple_tokenizer
+        )
+        benchmarks = {**benchmarks_en, **benchmarks_ja}
     else:
-        prof = nullcontext()
+        raise ValueError(f"Invalid lang: {args.lang}")
+    
+    # lang != "both"の場合のベンチマークロード
+    if args.lang != "both":
+        benchmarks = load_benchmarks_func(**benchmark_kwargs)
+
+    logger.info(f"Loaded {len(benchmarks)} benchmarks for language: {args.lang}")
 
     best_iter, best_simscore, best_loss = -1, 0, float("Inf")
     best_savepath = f"{args.savedir}/best"
+
+    if args.profile:
+        from torch.profiler import profile, ProfilerActivity
+        prof = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
+    else:
+        prof = nullcontext()
+
     for i in range(1, args.n_iters + 1):
 
         with Timer(elapsed, "prepare", sync_cuda=True):
@@ -206,6 +240,9 @@ def train(args):
         """ ----------------- forward pass -------------------"""
 
         with prof, Timer(elapsed, "forward", sync_cuda=True):
+            n_pos = labels.sum().item()
+            n_neg = (~labels).sum().item()
+
             if args.task == "skipgram":
                 if args.model.lower() == "fireword":
                     model: FireWord
@@ -275,25 +312,46 @@ def train(args):
                     )
                 else:
                     raise ValueError(args.model)
-            simscore = simscores.mean()
+            
+            # 言語別の平均スコアを計算
+            if args.lang == "en":
+                simscore = simscores.mean()
+                simscore_en = simscore
+                simscore_ja = None
+            elif args.lang == "ja":
+                simscore = simscores.mean()
+                simscore_en = None
+                simscore_ja = simscore
+            elif args.lang == "both":
+                # ENとJAのスコアを分けて計算
+                en_scores = simscores[[b for b in simscores.index if b in ALL_WORDSIM_BENCHMARKS]]
+                ja_scores = simscores[[b for b in simscores.index if b in ALL_WORDSIM_BENCHMARKS_JA]]
+                simscore_en = en_scores.mean() if len(en_scores) > 0 else None
+                simscore_ja = ja_scores.mean() if len(ja_scores) > 0 else None
+                simscore = simscores.mean()
+            
             if simscore > best_simscore:
                 best_iter = i
                 best_simscore = simscore
                 best_loss = total_loss.item()
                 model.save(best_savepath)
 
-            if args.task == "skipgram":
-                n_pos = labels.sum()
-                n_neg = len(labels) - n_pos
-            else:
-                n_pos = len(labels)
-                n_neg = 0
-            logger.info(
+            # ログ出力を言語別に対応
+            log_msg = (
                 f"Iter {i}. Loss={loss}; grad={grad_norm:.3g}; "
                 f"lr={scheduler.get_last_lr()[0]:.3g}; "
                 f"n={n_pos}+{n_neg}; "
-                f"meansim={simscore:.3f}%"
             )
+            if args.lang == "both":
+                log_msg += f"meansim(all)={simscore:.3f}%; "
+                if simscore_en is not None:
+                    log_msg += f"EN={simscore_en:.3f}%; "
+                if simscore_ja is not None:
+                    log_msg += f"JA={simscore_ja:.3f}%"
+            else:
+                log_msg += f"meansim={simscore:.3f}%"
+            
+            logger.info(log_msg)
             logger.debug(simscores.to_string(float_format="%5.1f"))
             total_timer.update()
             logger.debug("-- Elapsed --\n" + elapsed.format(thresh=0.8))
@@ -307,6 +365,14 @@ def train(args):
                     "eval/simscore": simscore,
                     **{f"eval/simscore/{bn}": score for bn, score in simscores.items()},
                 }
+                
+                # 言語別スコアをwandbに記録
+                if args.lang == "both":
+                    if simscore_en is not None:
+                        loginfo["eval/simscore_en"] = simscore_en
+                    if simscore_ja is not None:
+                        loginfo["eval/simscore_ja"] = simscore_ja
+                
                 if args.dim == 2:
                     """---------------- visualize ----------------"""
                     if args.model.lower() == "fireword":
@@ -323,18 +389,25 @@ def train(args):
 
     model.eval()
 
-    logger.info(
-        f"Best iteration: {best_iter}. Similarity score={best_simscore:.3g}, loss={best_loss:.3g}, savepath={best_savepath}"
-    )
+    log_best = f"Best iteration: {best_iter}. Similarity score={best_simscore:.3g}"
+    if args.lang == "both" and simscore_en is not None and simscore_ja is not None:
+        log_best += f" (EN={simscore_en:.3g}, JA={simscore_ja:.3g})"
+    log_best += f", loss={best_loss:.3g}, savepath={best_savepath}"
+    logger.info(log_best)
+    
     if args.use_wandb:
-        wandb.log(
-            {
-                "eval/best_iter": best_iter,
-                "eval/best_simscore": best_simscore,
-                "eval/best_loss": best_loss,
-                "eval/best_savepath": best_savepath,
-            }
-        )
+        wandb_log = {
+            "eval/best_iter": best_iter,
+            "eval/best_simscore": best_simscore,
+            "eval/best_loss": best_loss,
+            "eval/best_savepath": best_savepath,
+        }
+        if args.lang == "both":
+            if simscore_en is not None:
+                wandb_log["eval/best_simscore_en"] = simscore_en
+            if simscore_ja is not None:
+                wandb_log["eval/best_simscore_ja"] = simscore_ja
+        wandb.log(wandb_log)
 
 
 def set_seed(seed):
@@ -601,8 +674,8 @@ def parse_arguments():
         help="Load a pre-trained FIRE from wandb, by its ID (e.g., allen/firelang/abcdefghi)",
     )
     parser.add_argument("--tag", type=str, default=None)
-    parser.add_argument("--lang", type=str, default="en", choices=["en", "ja"],
-                        help="Language for benchmarking")
+    parser.add_argument("--lang", type=str, default="en", choices=["en", "ja", "both"],
+                        help="Language for benchmarking: 'en' (English only), 'ja' (Japanese only), or 'both'")
 
     args = parser.parse_args()
 

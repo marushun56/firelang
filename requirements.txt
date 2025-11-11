@@ -11,6 +11,7 @@ tqdm
 rich
 typing_extensions
 matplotlib
+japanize_matplotlib
 wandb
 mecab-python3
 janome
