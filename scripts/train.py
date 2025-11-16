@@ -200,11 +200,22 @@ def train(args):
         benchmark_list = ALL_WORDSIM_BENCHMARKS + ALL_WORDSIM_BENCHMARKS_JA
         # 両方のベンチマークをロード
         benchmarks_en = load_all_word_benchmarks(lower=args.benchmark_lower)
-        def simple_tokenizer(text):
-            return [text]
+        
+        # 日本語用に適切なトークナイザーを使用（英語と同じ）
+        try:
+            import MeCab
+            tagger = MeCab.Tagger("-Owakati")
+            def ja_tokenizer(text):
+                tokens = tagger.parse(text).strip().split()
+                return tokens
+        except ImportError:
+            logger.warning("MeCab not available for Japanese benchmark, using character-level")
+            def ja_tokenizer(text):
+                return list(text)
+        
         benchmarks_ja = load_all_word_benchmarks_ja(
-            lower=args.benchmark_lower, 
-            tokenizer=simple_tokenizer
+            lower=False,  # 日本語には大文字・小文字の概念がないのでFalse
+            tokenizer=ja_tokenizer
         )
         benchmarks = {**benchmarks_en, **benchmarks_ja}
     else:
