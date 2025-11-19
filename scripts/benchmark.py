@@ -214,8 +214,7 @@ def load_word_benchmark(
     else:
         return NotImplementedError
 
-    # 日本語ベンチマークの場合はlowerを適用しない
-    if lower and not name.endswith("_ja"):
+    if lower:
         dataset["word1"] = dataset["word1"].str.lower()
         dataset["word2"] = dataset["word2"].str.lower()
 
@@ -257,81 +256,69 @@ def benchmark_word_similarity(
     for bname, benchmark in benchmarks.items():
         benchmark: SimilarityBenchmark
 
-        pairs_str, labels = [], []
-        word_seqs1, word_seqs2 = [], []  # 形態素列を保存
+        pairs, pairs_str, labels = [], [], []
         oov_words = set()
-        oov_pairs = 0
-        
         for (word1, word2, wseq1, wseq2, sim) in iter(benchmark):
-            # 形態素列の各形態素が語彙にあるかチェック
-            wseq1_valid = [w for w in wseq1 if w in vocab.s2i]
-            wseq2_valid = [w for w in wseq2 if w in vocab.s2i]
-            
-            # OOVの形態素を記録
-            for w in wseq1:
-                if w not in vocab.s2i:
-                    oov_words.add(w)
-            for w in wseq2:
-                if w not in vocab.s2i:
-                    oov_words.add(w)
-            
-            # 両方の単語の少なくとも1つの形態素が語彙にあるかチェック
-            if len(wseq1_valid) == 0 or len(wseq2_valid) == 0:
-                oov_pairs += 1
-                continue
-            
             pairs_str.append((word1, word2))
             labels.append(sim)
-            
-            # 形態素列のIDを保存（後で埋め込みを平均化するため）
-            word_seqs1.append([vocab.s2i[w] for w in wseq1_valid])
-            word_seqs2.append([vocab.s2i[w] for w in wseq2_valid])
 
-        if len(word_seqs1) == 0:
-            logger.warning(f"Benchmark {bname}: No valid pairs (all OOV)")
-            scores[bname] = 0.0
-            continue
-
-        logger.debug(
-            f"Benchmark {bname}: {len(word_seqs1)} valid pairs, "
-            f"{oov_pairs} OOV pairs, {len(oov_words)} unique OOV words"
-        )
+            pair = []
+            for w in [word1, word2]:
+                # Handle both old and new vocab interfaces
+                if hasattr(vocab, 'unk_id'):
+                    unk_id = unk_token_id
+                else:
+                    unk_id = vocab.special_name2i.get('<unk>', 0)
+                
+                pair.append(vocab.s2i.get(w, unk_id))
+                if w not in vocab.s2i:
+                    oov_words.add(w)
+            pairs.append(pair)
 
         labels = np.array(labels)
+        pairs = torch.tensor(pairs, device=device, dtype=torch.long)
 
-        """ similarity - 形態素埋め込みを平均化 """
+        if len(oov_words) and not _cache.get(f"oov_reported/{bname}", False):
+            logger.warning(
+                f"Benchmark {bname}: {len(oov_words)} words "
+                f"(in {len(benchmark)} pairs) out of vocabulary\n"
+                + ", ".join(list(oov_words))
+            )
+            _cache[f"oov_reported/{bname}"] = True
+
+        """ similarity """
         with Timer(elapsed, "similarity", sync_cuda=True):
-            preds_list = []
-            
-            for seq1, seq2 in zip(word_seqs1, word_seqs2):
-                # 形態素列をテンソルに変換
-                ids1 = torch.tensor(seq1, device=device, dtype=torch.long)
-                ids2 = torch.tensor(seq2, device=device, dtype=torch.long)
-                
-                # 各形態素の埋め込みを取得
-                x1 = model.forward(ids1)
-                x2 = model.forward(ids2)
-                
-                # 形態素埋め込みを平均化
-                func1 = x1.funcs.mean(dim=0, keepdim=True) if len(seq1) > 1 else x1.funcs
-                measure1 = x1.measures.mean(dim=0, keepdim=True) if len(seq1) > 1 else x1.measures
-                func2 = x2.funcs.mean(dim=0, keepdim=True) if len(seq2) > 1 else x2.funcs
-                measure2 = x2.measures.mean(dim=0, keepdim=True) if len(seq2) > 1 else x2.measures
-                
-                # 類似度計算
-                pred = measure1.integral(func2 - func1) + measure2.integral(func1 - func2)
-                preds_list.append(pred.squeeze())
-            
-            preds = torch.stack(preds_list)
+            x1: FIRETensor = model.forward(pairs[..., 0])
+            x2: FIRETensor = model.forward(pairs[..., 1])
+            preds = x1.measures.integral(x2.funcs - x1.funcs) + x2.measures.integral(
+                x1.funcs - x2.funcs
+            )
 
-        """ smoothing - Min-Max正規化 """
-        # Spearman相関は順位ベースなので単調変換は結果に影響しない
-        preds_min = preds.min()
-        preds_max = preds.max()
-        if preds_max > preds_min:
-            preds = (preds - preds_min) / (preds_max - preds_min)
-        
-        preds = preds.data.cpu().numpy()
+        """ smoothing by standardization """
+
+        def _estimate_mean_var(func, measure):
+            sims = xall.measures.integral(func, cross=True) + torch.transpose(
+                measure.integral(xall.funcs, cross=True), -2, -1
+            )
+            sims = sims - (
+                measure.integral(func).reshape(-1, 1)
+                + xall.measures.integral(xall.funcs).reshape(1, -1)
+            )
+            mean, std = sims.mean(dim=1), sims.std(dim=1)
+            return mean, std
+
+        with Timer(elapsed, "smooth", sync_cuda=True):
+            allids = torch.cat([pairs[:, 0], pairs[:, 1]], dim=0)
+            xall: FIRETensor = model(allids)
+
+            sims1mean, sims1std = _estimate_mean_var(x1.funcs, x1.measures)
+            sims2mean, sims2std = _estimate_mean_var(x2.funcs, x2.measures)
+
+            preds = (preds - sims1mean / 2 - sims2mean / 2) / (
+                sims1std * sims2std
+            ) ** 0.5
+            preds = preds.exp()
+            preds = preds.data.cpu().numpy()
 
         """ spearmann """
         r = spearmanr(labels, preds)
