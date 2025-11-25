@@ -134,12 +134,7 @@ class FireWord(FireEmbedding):
         """
 
         s2i = self.vocab.s2i
-        # Handle both old and new vocab interfaces
-        if hasattr(self.vocab, 'unk_id'):
-            unk_id = self.vocab.unk_id
-        else:
-            # For SimpleVocab, use special_name2i
-            unk_id = self.vocab.special_name2i.get('<unk>', 0)
+        unk_id = self.vocab.special_name2i.get('<unk>', 0)
         
         if isinstance(words, str):  # only one word
             ids = [s2i.get(words, unk_id)]

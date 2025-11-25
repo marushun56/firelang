@@ -11,6 +11,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import japanize_matplotlib
 import numpy as np
+import pandas as pd
 import torch
 from torch.optim import AdamW, Adam, SGD, Adagrad
 from torch.optim.lr_scheduler import OneCycleLR
@@ -29,6 +30,7 @@ from scripts.benchmark import (
     load_all_word_benchmarks,
     load_all_word_benchmarks_ja,
     benchmark_word_similarity,
+    benchmark_sentence_similarity,
 )
 from scripts.dataloader import DataLoader
 
@@ -107,23 +109,10 @@ def train(args):
         # Create sampler
         dataset = config.sampler(args.seed, num_threads=4)
         
-        # Create vocab object for model (we'll need to create a simple wrapper)
-        class SimpleVocab:
-            def __init__(self, s2i, i2s):
-                self.s2i = s2i
-                self.i2s = i2s
-                self.special_name2i = vocab_data.get('special_name2i', {})
-            
-            def __len__(self):
-                return len(self.s2i)
-            
-            def __getitem__(self, key):
-                if isinstance(key, str):
-                    return self.s2i.get(key, self.special_name2i.get('<unk>', 0))
-                else:
-                    return self.i2s.get(key, '<unk>')
+        # Convert i2s keys to integers
+        i2s = {int(k): v for k, v in vocab_data['i2s'].items()}
         
-        vocab = SimpleVocab(vocab_data['s2i'], vocab_data['i2s'])
+        vocab = SimpleVocab(vocab_data['s2i'], i2s, word_counts=word_counts)
     else:
         raise ValueError(f"Failed to recognize task == {args.task}")
     # Create a more efficient dataloader
@@ -178,6 +167,7 @@ def train(args):
     logger.info(f"  Scheduler: {scheduler}")
 
     # ベンチマークの選択
+    viz_tokenizer = None
     if args.lang == "en":
         benchmark_list = ALL_WORDSIM_BENCHMARKS
         load_benchmarks_func = load_all_word_benchmarks
@@ -195,6 +185,7 @@ def train(args):
             logger.warning("MeCab not available, using character-level tokenization")
             def ja_tokenizer(text):
                 return list(text)
+        viz_tokenizer = ja_tokenizer
         benchmark_kwargs = {"lower": args.benchmark_lower, "tokenizer": ja_tokenizer}
     elif args.lang == "both":
         benchmark_list = ALL_WORDSIM_BENCHMARKS + ALL_WORDSIM_BENCHMARKS_JA
@@ -212,6 +203,7 @@ def train(args):
             logger.warning("MeCab not available for Japanese benchmark, using character-level")
             def ja_tokenizer(text):
                 return list(text)
+        viz_tokenizer = ja_tokenizer
         
         benchmarks_ja = load_all_word_benchmarks_ja(
             lower=False,  # 日本語には大文字・小文字の概念がないのでFalse
@@ -314,13 +306,21 @@ def train(args):
             """--------------- similarity benchmark ---------------"""
             with Timer(elapsed, "benchmark", sync_cuda=True):
                 if args.model.lower() == "fireword":
-                    simscores = (
-                        benchmark_word_similarity(
-                            model,
-                            benchmarks,
-                        )
-                        * 100
-                    )
+                    simscores = pd.Series(dtype=float)
+
+                    # English benchmarks (Word Similarity)
+                    if args.lang in ["en", "both"]:
+                        benchmarks_en_to_run = {k: v for k, v in benchmarks.items() if k in ALL_WORDSIM_BENCHMARKS}
+                        if benchmarks_en_to_run:
+                            scores_en = benchmark_word_similarity(model, benchmarks_en_to_run) * 100
+                            simscores = pd.concat([simscores, scores_en])
+
+                    # Japanese benchmarks (Sentence Similarity / STS)
+                    if args.lang in ["ja", "both"]:
+                        benchmarks_ja_to_run = {k: v for k, v in benchmarks.items() if k in ALL_WORDSIM_BENCHMARKS_JA}
+                        if benchmarks_ja_to_run:
+                            scores_ja = benchmark_sentence_similarity(model, benchmarks_ja_to_run) * 100
+                            simscores = pd.concat([simscores, scores_ja])
                 else:
                     raise ValueError(args.model)
             
@@ -387,7 +387,7 @@ def train(args):
                 if args.dim == 2:
                     """---------------- visualize ----------------"""
                     if args.model.lower() == "fireword":
-                        fig = visualize_fire(model, args.plot_words)
+                        fig = visualize_fire(model, args.plot_words, tokenizer=viz_tokenizer)
                     else:
                         raise ValueError(args.model)
                     img = wandb.Image(_fig2array(fig))
@@ -421,6 +421,33 @@ def train(args):
         wandb.log(wandb_log)
 
 
+class SimpleVocab:
+    def __init__(self, s2i, i2s, word_counts=None, unk='<unk>'):
+        self.s2i = s2i
+        self.i2s = i2s
+        self.unk = unk
+        self._word_counts = word_counts
+        # Add special_name2i for compatibility with FireWord
+        self.special_name2i = {unk: s2i.get(unk, 0)}
+    
+    def __len__(self):
+        return len(self.s2i)
+    
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self.s2i.get(key, self.s2i.get(self.unk))
+        elif isinstance(key, int):
+            return self.i2s.get(key, self.unk)
+        return None
+
+    def counts_dict(self):
+        if self._word_counts:
+            # self._word_counts is {int_id: count}.
+            # We need {str_word: count}.
+            return {self.i2s[k]: v for k, v in self._word_counts.items() if k in self.i2s}
+        return {word: 1.0 for word in self.s2i.keys()}
+
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -444,47 +471,110 @@ def _fig2array(fig):
 
 
 @torch.no_grad()
-def visualize_fire(model: FireWord, words: List[str], r: float = 4):
-    ft: FireTensor = model[words]
-    measure = ft.measures
-    positions = measure.get_x()
-    weights = (
-        torch.ones(
-            positions.shape[0], positions.shape[1], dtype=x.dtype, device=x.device
-        )
-        if isinstance(measure.m, float)
-        else measure.m.abs()
-    )
-    # positions: (stack_size, n, dim)
-    # weights:   (stack_size, n)
+def visualize_fire(model: FireWord, words: List[str], r: float = 4, tokenizer=None):
+    
+    # Prepare data for plotting
+    plot_data = [] # List of (positions, weights) tuples
+    
+    s2i = model.vocab.s2i
+    unk = model.vocab.unk if hasattr(model.vocab, 'unk') else '<unk>'
+    
+    device = next(model.parameters()).device
 
-    if measure.limits is not None:
-        xmin, xmax = measure.limits[0].data.cpu().numpy().tolist()
-        ymin, ymax = measure.limits[1].data.cpu().numpy().tolist()
+    for w in words:
+        if tokenizer:
+            tokens = tokenizer(w)
+        else:
+            tokens = [w]
+            
+        # Filter tokens
+        valid_tokens = []
+        for t in tokens:
+            if t in s2i:
+                valid_tokens.append(t)
+            else:
+                if unk in s2i:
+                    valid_tokens.append(unk)
+        
+        if not valid_tokens:
+            logger.warning(f"Word '{w}' (tokens: {tokens}) has no valid tokens in vocab.")
+            continue
+            
+        # Get measures
+        ft = model[valid_tokens]
+        measure = ft.measures
+        pos = measure.get_x() # (num_tokens, n, dim)
+        # ensure positions and weights live on the model device
+        if isinstance(pos, torch.Tensor):
+            pos = pos.to(device)
+
+        if isinstance(measure.m, float):
+            ws = torch.ones(pos.shape[0], pos.shape[1], dtype=pos.dtype, device=pos.device) * measure.m
+        else:
+            ws = measure.m.abs().to(device)
+             
+        # Flatten
+        pos_flat = pos.reshape(-1, pos.shape[-1])
+        ws_flat = ws.reshape(-1)
+        
+        plot_data.append((pos_flat, ws_flat))
+
+    if not plot_data:
+        logger.warning("No data to plot.")
+        return plt.figure()
+
+    # Calculate limits
+    all_pos = torch.cat([p for p, w in plot_data], dim=0)
+    
+    xmax = max(r, all_pos[:, 0].max().item())
+    xmin = min(-r, all_pos[:, 0].min().item())
+    ymax = max(r, all_pos[:, 1].max().item())
+    ymin = min(-r, all_pos[:, 1].min().item())
+
+    # Ensure meshgrid is created on the same device as the model to avoid
+    # cpu/cuda mixing when calling `model.field` below.
+    device = next(model.parameters()).device
+    xmesh = torch.linspace(xmin, xmax, 100, device=device)
+    ymesh = torch.linspace(ymin, ymax, 100, device=device)
+    xmesh, ymesh = torch.meshgrid(xmesh, ymesh)
+    
+    # Calculate field for the first word (phrase)
+    score = torch.zeros_like(xmesh, device=device)
+    w0 = words[0]
+    if tokenizer:
+        tokens0 = tokenizer(w0)
     else:
-        xmax, xmin, ymax, ymin = r, -r, r, -r
-    xmax = max(xmax, positions[:, :, 0].max().item())
-    xmin = min(xmin, positions[:, :, 0].min().item())
-    ymax = max(ymax, positions[:, :, 1].max().item())
-    ymin = min(ymin, positions[:, :, 1].min().item())
-
-    xmesh, ymesh = torch.meshgrid(
-        torch.linspace(xmin, xmax, 100), torch.linspace(ymin, ymax, 100)
-    )
-    score = model.field(words[0], xmesh, ymesh)
+        tokens0 = [w0]
+    
+    valid_tokens0 = [t if t in s2i else unk for t in tokens0]
+    valid_tokens0 = [t for t in valid_tokens0 if t in s2i]
+    
+    for t in valid_tokens0:
+        # make sure arguments to model.field are on the model device
+        tx, ty = xmesh, ymesh
+        # if model.field expects CPU tensors for some reason, it will
+        # handle device movement internally; usually it's faster to keep
+        # everything on the same device
+        score += model.field(t, tx, ty)
 
     def _sigmoid(x):
         return 1 / (1 + np.exp(-x))
 
     colors = ["#370665", "#35589A", "#F14A16", "#FC9918"]
     fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-    xmesh, ymesh, score, positions, weights = list(
-        map(lambda x: x.data.cpu().numpy(), [xmesh, ymesh, score, positions, weights])
-    )
+    
+    # Move data back to CPU for plotting
+    xmesh, ymesh, score = list(map(lambda x: x.detach().cpu().numpy(), [xmesh, ymesh, score]))
+    
     cont = ax.contourf(xmesh, ymesh, score)
     handlers = []
-    for i in range(len(words)):
-        pos, ws, color = positions[i], weights[i], colors[i % len(colors)]
+    
+    for i, (pos, ws) in enumerate(plot_data):
+        pos = pos.detach().cpu().numpy()
+        ws = ws.detach().cpu().numpy()
+        color = colors[i % len(colors)]
+        
+        h = None
         for (x, y), w in zip(pos, ws):
             (h,) = ax.plot(
                 x,
@@ -494,8 +584,10 @@ def visualize_fire(model: FireWord, words: List[str], r: float = 4):
                 markersize=_sigmoid(w) * 10,
                 markeredgecolor="white",
             )
-        handlers.append(h)
-    ax.legend(handlers, words)
+        if h:
+            handlers.append(h)
+            
+    ax.legend(handlers, words[:len(handlers)])
     fig.colorbar(cont)
     return fig
 
@@ -653,7 +745,7 @@ def parse_arguments():
     parser.add_argument("--cpu", action="store_true", help="Use cpu rather than CUDA.")
     parser.add_argument("--savedir", type=str, default="./results/")
     parser.add_argument(
-        "--plot_words", type=list, default=["cat", "happy", "car"]
+        "--plot_words", type=list, default=["bank", "river", "ball"]
     )
     parser.add_argument(
         "--benchmarks",

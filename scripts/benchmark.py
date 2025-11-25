@@ -214,7 +214,7 @@ def load_word_benchmark(
     else:
         return NotImplementedError
 
-    if lower:
+    if lower and not name.endswith("_ja"):
         dataset["word1"] = dataset["word1"].str.lower()
         dataset["word2"] = dataset["word2"].str.lower()
 
@@ -266,9 +266,13 @@ def benchmark_word_similarity(
             for w in [word1, word2]:
                 # Handle both old and new vocab interfaces
                 if hasattr(vocab, 'unk_id'):
-                    unk_id = unk_token_id
-                else:
+                    unk_id = vocab.unk_id
+                elif hasattr(vocab, 'special_name2i'):
                     unk_id = vocab.special_name2i.get('<unk>', 0)
+                else:
+                    # Fallback for SimpleVocab without special_name2i
+                    unk_token = getattr(vocab, 'unk', '<unk>')
+                    unk_id = vocab.s2i.get(unk_token, 0)
                 
                 pair.append(vocab.s2i.get(w, unk_id))
                 if w not in vocab.s2i:
@@ -539,7 +543,7 @@ def sentence_simmat(model, sents: List[List[str]], sif_weights: Mapping[str, flo
     idseqs = [[s2i[w] for w in sent] for sent in sents]
 
     sentsim = sentsim_as_weighted_wordsim_cuda(
-        wordsim, weights, idseqs, device=model.detect_device().index
+        wordsim, weights, idseqs, device=model.detect_device()
     )
     return sentsim
 
