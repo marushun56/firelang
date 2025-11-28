@@ -15,6 +15,8 @@ def parse_args():
                         help="Language for tokenization (en: English with NLTK, ja: Japanese with MeCab/Janome)")
     parser.add_argument("--ja_tokenizer", type=str, default="mecab", choices=["mecab", "janome"],
                         help="Japanese tokenizer to use (mecab or janome)")
+    parser.add_argument("--ja_pos_filter", action="store_true",
+                        help="Filter Japanese tokens by POS (noun, verb, adjective, adverb, auxiliary verb)")
 
     return parser.parse_args()
 
@@ -45,19 +47,31 @@ def run(args):
 
         # 日本語トークナイザーの初期化
         ja_tokenizer_instance = None
+        ja_pos_filter = getattr(args, 'ja_pos_filter', False)
+        
+        # 許可する品詞（動詞、名詞、形容詞、形容動詞、副詞、助動詞）
+        ALLOWED_POS = {'動詞', '名詞', '形容詞', '形容動詞', '副詞', '助動詞'}
+        
         if args.lang == "ja":
             if args.ja_tokenizer == "mecab":
                 try:
                     import MeCab
                     # 辞書パスを自動検出して指定
                     try:
-                        ja_tokenizer_instance = MeCab.Tagger("-Owakati")
+                        # 品詞フィルタを使う場合は -Ochasen か デフォルト出力を使う
+                        if ja_pos_filter:
+                            ja_tokenizer_instance = MeCab.Tagger()
+                        else:
+                            ja_tokenizer_instance = MeCab.Tagger("-Owakati")
                     except RuntimeError:
                         # unidic-liteを使用
                         import unidic_lite
                         dic_dir = unidic_lite.DICDIR
-                        ja_tokenizer_instance = MeCab.Tagger(f"-Owakati -d {dic_dir}")
-                    logger.info("Using MeCab for Japanese tokenization")
+                        if ja_pos_filter:
+                            ja_tokenizer_instance = MeCab.Tagger(f"-d {dic_dir}")
+                        else:
+                            ja_tokenizer_instance = MeCab.Tagger(f"-Owakati -d {dic_dir}")
+                    logger.info(f"Using MeCab for Japanese tokenization (POS filter: {ja_pos_filter})")
                 except ImportError as e:
                     logger.error(f"MeCab not installed: {e}")
                     raise
@@ -65,12 +79,12 @@ def run(args):
                 try:
                     from janome.tokenizer import Tokenizer
                     ja_tokenizer_instance = Tokenizer()
-                    logger.info("Using Janome for Japanese tokenization")
+                    logger.info(f"Using Janome for Japanese tokenization (POS filter: {ja_pos_filter})")
                 except ImportError:
                     logger.error("Janome not installed. Please install janome")
                     raise
 
-        def _tokenize(line, sos, eos, lang, ja_tok=None):
+        def _tokenize(line, sos, eos, lang, ja_tok=None, pos_filter=False, allowed_pos=None):
             if not args.cased:
                 line = line.lower()
             line = line.strip()
@@ -80,9 +94,30 @@ def run(args):
             if lang == "ja":
                 # 日本語のトークナイズ
                 if args.ja_tokenizer == "mecab":
-                    tokens = ja_tok.parse(line).strip().split()
+                    if pos_filter and allowed_pos:
+                        # 品詞フィルタ付きトークナイズ
+                        tokens = []
+                        parsed = ja_tok.parse(line)
+                        for line_result in parsed.strip().split('\n'):
+                            if line_result == 'EOS' or not line_result:
+                                continue
+                            parts = line_result.split('\t')
+                            # UniDic形式: 表層形, 読み1, 読み2, 原形, 品詞, ...
+                            # 品詞は5番目（index 4）にある（例: "名詞-固有名詞-地名-一般"）
+                            if len(parts) >= 5:
+                                surface = parts[0]
+                                pos_full = parts[4]  # 品詞情報（例: "動詞-非自立可能"）
+                                pos = pos_full.split('-')[0]  # 最初の品詞だけ取得
+                                if pos in allowed_pos:
+                                    tokens.append(surface)
+                    else:
+                        tokens = ja_tok.parse(line).strip().split()
                 elif args.ja_tokenizer == "janome":
-                    tokens = [token.surface for token in ja_tok.tokenize(line)]
+                    if pos_filter and allowed_pos:
+                        tokens = [token.surface for token in ja_tok.tokenize(line)
+                                  if token.part_of_speech.split(',')[0] in allowed_pos]
+                    else:
+                        tokens = [token.surface for token in ja_tok.tokenize(line)]
                 return [sos] + tokens + [eos]
             else:
                 # 英語のトークナイズ
@@ -106,7 +141,9 @@ def run(args):
                         "sos": args.sos, 
                         "eos": args.eos,
                         "lang": args.lang,
-                        "ja_tok": ja_tokenizer_instance
+                        "ja_tok": ja_tokenizer_instance,
+                        "pos_filter": ja_pos_filter,
+                        "allowed_pos": ALLOWED_POS
                     },
                     max_size_bytes=max_size_bytes,
                 )

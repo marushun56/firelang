@@ -1,0 +1,19 @@
+python -m scripts.train \
+    --corpus_path=data/corpus/ja/ja-text8.uncased.tokens \
+    --sz_batch=32768 \
+    --n_neg=1 \
+    --lr=0.005 \
+    --lr_scheduler=OneCycleLR \
+    --dim=2 \
+    --n_iters=600000 \
+    --eval_interval=1000 \
+    --savedir=results/ \
+    --optimizer=adamw \
+    --seed=0 \
+    --accum_steps=10 \
+    --func='MLPlanarDivFast(dim, 4).neg()' \
+    --measure='DiracMixture(dim, 1)' \
+    --weight_decay=1e-6 \
+    --lang=both \
+    --plot_words="行く,重い,言葉" \
+    --use_wandb

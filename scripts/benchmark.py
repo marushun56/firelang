@@ -234,8 +234,59 @@ def load_all_word_benchmarks(dirpath=DEFAULT_WORDSIM_DIR, lower=True):
         benchmarks[bname] = load_word_benchmark(bname, dirpath=dirpath, lower=lower)
     return benchmarks
 
+# 日本語用品詞フィルタ付きトークナイザを作成するヘルパー関数
+def create_ja_tokenizer_with_pos_filter(allowed_pos=None):
+    """
+    品詞フィルタ付き日本語トークナイザを作成する。
+    
+    Args:
+        allowed_pos: 許可する品詞のセット。デフォルトは動詞、名詞、形容詞、形容動詞、副詞、助動詞。
+    
+    Returns:
+        tokenizer関数
+    """
+    if allowed_pos is None:
+        allowed_pos = {'動詞', '名詞', '形容詞', '形容動詞', '副詞', '助動詞'}
+    
+    try:
+        import MeCab
+        tagger = MeCab.Tagger()
+        
+        def ja_tokenizer(text):
+            tokens = []
+            parsed = tagger.parse(text)
+            for line in parsed.strip().split('\n'):
+                if line == 'EOS' or not line:
+                    continue
+                parts = line.split('\t')
+                # UniDic形式: 表層形, 読み1, 読み2, 原形, 品詞, ...
+                # 品詞は5番目（index 4）にある（例: "動詞-非自立可能"）
+                if len(parts) >= 5:
+                    surface = parts[0]
+                    pos_full = parts[4]  # 品詞情報
+                    pos = pos_full.split('-')[0]  # 最初の品詞だけ取得
+                    if pos in allowed_pos:
+                        tokens.append(surface)
+            return tokens
+        return ja_tokenizer
+    except ImportError:
+        logger.warning("MeCab not available, returning identity tokenizer")
+        return lambda x: [x]
+
+
 # 日本語ベンチマーク用の関数追加
-def load_all_word_benchmarks_ja(dirpath=DEFAULT_WORDSIM_DIR_JA, lower=True, tokenizer: Callable = lambda x: [x]):
+def load_all_word_benchmarks_ja(dirpath=DEFAULT_WORDSIM_DIR_JA, lower=True, tokenizer: Callable = None):
+    """
+    日本語単語類似度ベンチマークをロードする。
+    
+    Args:
+        dirpath: ベンチマークデータのディレクトリパス
+        lower: 小文字化するか（日本語では通常False）
+        tokenizer: トークナイザ関数。Noneの場合は品詞フィルタ付きMeCabトークナイザを使用。
+    """
+    if tokenizer is None:
+        tokenizer = create_ja_tokenizer_with_pos_filter()
+    
     benchmarks = {}
     for bname in ALL_WORDSIM_BENCHMARKS_JA:
         benchmarks[bname] = load_word_benchmark(bname, dirpath=dirpath, lower=lower, tokenizer=tokenizer)

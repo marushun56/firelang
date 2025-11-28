@@ -175,12 +175,28 @@ def train(args):
     elif args.lang == "ja":
         benchmark_list = ALL_WORDSIM_BENCHMARKS_JA
         load_benchmarks_func = load_all_word_benchmarks_ja
-        # 日本語の場合はコーパスと同じトークナイザーを使う
+        # 日本語の場合はコーパスと同じトークナイザーを使う（品詞フィルタ付き）
+        # 許可する品詞（動詞、名詞、形容詞、形容動詞、副詞、助動詞）
+        ALLOWED_POS_JA = {'動詞', '名詞', '形容詞', '形容動詞', '副詞', '助動詞'}
         try:
             import MeCab
-            tagger = MeCab.Tagger("-Owakati")
+            tagger = MeCab.Tagger()
             def ja_tokenizer(text):
-                return tagger.parse(text).strip().split()
+                tokens = []
+                parsed = tagger.parse(text)
+                for line in parsed.strip().split('\n'):
+                    if line == 'EOS' or not line:
+                        continue
+                    parts = line.split('\t')
+                    # UniDic形式: 表層形, 読み1, 読み2, 原形, 品詞, ...
+                    # 品詞は5番目（index 4）にある
+                    if len(parts) >= 5:
+                        surface = parts[0]
+                        pos_full = parts[4]  # 品詞情報
+                        pos = pos_full.split('-')[0]  # 最初の品詞だけ取得
+                        if pos in ALLOWED_POS_JA:
+                            tokens.append(surface)
+                return tokens
         except ImportError:
             logger.warning("MeCab not available, using character-level tokenization")
             def ja_tokenizer(text):
@@ -193,11 +209,26 @@ def train(args):
         benchmarks_en = load_all_word_benchmarks(lower=args.benchmark_lower)
         
         # 日本語用に適切なトークナイザーを使用（英語と同じ）
+        # 許可する品詞（動詞、名詞、形容詞、形容動詞、副詞、助動詞）
+        ALLOWED_POS_JA = {'動詞', '名詞', '形容詞', '形容動詞', '副詞', '助動詞'}
         try:
             import MeCab
-            tagger = MeCab.Tagger("-Owakati")
+            tagger = MeCab.Tagger()
             def ja_tokenizer(text):
-                tokens = tagger.parse(text).strip().split()
+                tokens = []
+                parsed = tagger.parse(text)
+                for line in parsed.strip().split('\n'):
+                    if line == 'EOS' or not line:
+                        continue
+                    parts = line.split('\t')
+                    # UniDic形式: 表層形, 読み1, 読み2, 原形, 品詞, ...
+                    # 品詞は5番目（index 4）にある
+                    if len(parts) >= 5:
+                        surface = parts[0]
+                        pos_full = parts[4]  # 品詞情報
+                        pos = pos_full.split('-')[0]  # 最初の品詞だけ取得
+                        if pos in ALLOWED_POS_JA:
+                            tokens.append(surface)
                 return tokens
         except ImportError:
             logger.warning("MeCab not available for Japanese benchmark, using character-level")
