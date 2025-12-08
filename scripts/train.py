@@ -30,6 +30,7 @@ from scripts.benchmark import (
     load_all_word_benchmarks,
     load_all_word_benchmarks_ja,
     benchmark_word_similarity,
+    benchmark_word_similarity_ja,
     benchmark_sentence_similarity,
 )
 from scripts.dataloader import DataLoader
@@ -346,11 +347,11 @@ def train(args):
                             scores_en = benchmark_word_similarity(model, benchmarks_en_to_run) * 100
                             simscores = pd.concat([simscores, scores_en])
 
-                    # Japanese benchmarks (Sentence Similarity / STS)
+                    # Japanese benchmarks (Word Similarity with morpheme-aware calculation)
                     if args.lang in ["ja", "both"]:
                         benchmarks_ja_to_run = {k: v for k, v in benchmarks.items() if k in ALL_WORDSIM_BENCHMARKS_JA}
                         if benchmarks_ja_to_run:
-                            scores_ja = benchmark_sentence_similarity(model, benchmarks_ja_to_run) * 100
+                            scores_ja = benchmark_word_similarity_ja(model, benchmarks_ja_to_run) * 100
                             simscores = pd.concat([simscores, scores_ja])
                 else:
                     raise ValueError(args.model)

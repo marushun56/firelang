@@ -34,6 +34,7 @@ __all__ = [
     "load_wic_benchmark",
     "load_all_wic_benchmarks",
     "benchmark_word_similarity",
+    "benchmark_word_similarity_ja",
     "benchmark_sentence_similarity",
     "benchmark_word_in_context",
 ]
@@ -378,6 +379,134 @@ def benchmark_word_similarity(
         """ spearmann """
         r = spearmanr(labels, preds)
         scores[bname] = r.correlation
+    return pd.Series(scores)
+
+
+@torch.no_grad()
+@Timer(elapsed, "wordsim_ja")
+def benchmark_word_similarity_ja(
+    model: FireWord, benchmarks: Mapping[str, SimilarityBenchmark]
+):
+    """
+    日本語単語類似度ベンチマーク用の関数。
+    形態素の組み合わせを考慮した類似度計算を行う。
+    
+    単語が複数の形態素から構成される場合：
+    - potential(w1, w2) = (f1+f2+...+fn)*u_w2 + f_w2*(u1+u2+...+un)
+    - similarity(w1, w2) = potential(w1,w2) - 0.5*potential(w1,w1) - 0.5*potential(w2,w2)
+    - 最終スコア = similarity / (len(w1) * len(w2))  # 形態素数による正規化
+    """
+    vocab = model.vocab
+    device = model.detect_device()
+
+    scores = {}
+    for bname, benchmark in benchmarks.items():
+        benchmark: SimilarityBenchmark
+
+        word_pairs = []  # [(word1, word2, wseq1, wseq2), ...]
+        labels = []
+        oov_words = set()
+        
+        # Handle both old and new vocab interfaces
+        if hasattr(vocab, 'unk_id'):
+            unk_id = vocab.unk_id
+        elif hasattr(vocab, 'special_name2i'):
+            unk_id = vocab.special_name2i.get('<unk>', 0)
+        else:
+            unk_token = getattr(vocab, 'unk', '<unk>')
+            unk_id = vocab.s2i.get(unk_token, 0)
+
+        for (word1, word2, wseq1, wseq2, sim) in iter(benchmark):
+            labels.append(sim)
+            
+            # Convert word sequences to token IDs
+            ids1 = []
+            for token in wseq1:
+                token_id = vocab.s2i.get(token, unk_id)
+                ids1.append(token_id)
+                if token not in vocab.s2i:
+                    oov_words.add(token)
+            
+            ids2 = []
+            for token in wseq2:
+                token_id = vocab.s2i.get(token, unk_id)
+                ids2.append(token_id)
+                if token not in vocab.s2i:
+                    oov_words.add(token)
+            
+            # Skip if either word has no valid tokens
+            if len(ids1) > 0 and len(ids2) > 0:
+                word_pairs.append((word1, word2, ids1, ids2))
+
+        if len(oov_words) and not _cache.get(f"oov_reported/{bname}", False):
+            logger.warning(
+                f"Benchmark {bname}: {len(oov_words)} tokens "
+                f"(morphemes) out of vocabulary\n"
+                + ", ".join(list(oov_words)[:50])  # Limit output
+            )
+            _cache[f"oov_reported/{bname}"] = True
+
+        labels = np.array(labels[:len(word_pairs)])  # Match filtered pairs
+        
+        """ Calculate similarity using morpheme-aware potential """
+        preds = []
+        
+        with Timer(elapsed, "similarity", sync_cuda=True):
+            for (word1, word2, ids1, ids2) in word_pairs:
+                # Get FireTensor for each morpheme sequence
+                ids1_tensor = torch.tensor(ids1, device=device, dtype=torch.long)
+                ids2_tensor = torch.tensor(ids2, device=device, dtype=torch.long)
+                
+                x1: FireTensor = model.forward(ids1_tensor)  # (n1, ...)
+                x2: FireTensor = model.forward(ids2_tensor)  # (n2, ...)
+                
+                # Sum of funcs and measures for each word
+                # f1_sum = sum of all funcs in word1
+                f1_sum = x1.funcs.sum(dim=0, keepdim=True)  # (1, ...)
+                u1_sum = x1.measures.sum(dim=0)  # Sum measures
+                
+                f2_sum = x2.funcs.sum(dim=0, keepdim=True)  # (1, ...)
+                u2_sum = x2.measures.sum(dim=0)  # Sum measures
+                
+                # potential(w1, w2) = f1_sum * u2_sum + f2_sum * u1_sum
+                # Using integral for the potential calculation
+                pot_12 = u2_sum.integral(f1_sum) + u1_sum.integral(f2_sum)
+                
+                # potential(w1, w1) for normalization
+                pot_11 = u1_sum.integral(f1_sum) + u1_sum.integral(f1_sum)
+                
+                # potential(w2, w2) for normalization
+                pot_22 = u2_sum.integral(f2_sum) + u2_sum.integral(f2_sum)
+                
+                # similarity = pot_12 - 0.5 * pot_11 - 0.5 * pot_22
+                sim_raw = pot_12 - 0.5 * pot_11 - 0.5 * pot_22
+                
+                # Normalize by morpheme count: 1 / (len(w1) * len(w2))
+                normalization = 1.0 / (len(ids1) * len(ids2))
+                sim_normalized = sim_raw * normalization
+                
+                preds.append(sim_normalized.item())
+        
+        preds = np.array(preds)
+        
+        """ Apply exponential smoothing """
+        # Standardize predictions
+        if len(preds) > 1:
+            pred_mean = preds.mean()
+            pred_std = preds.std()
+            if pred_std > 0:
+                preds = (preds - pred_mean) / pred_std
+        
+        preds = np.exp(preds)
+
+        """ Spearman correlation """
+        if len(labels) > 0 and len(preds) > 0:
+            r = spearmanr(labels, preds)
+            scores[bname] = r.correlation
+        else:
+            scores[bname] = 0.0
+            logger.warning(f"Benchmark {bname}: No valid pairs found")
+    
     return pd.Series(scores)
 
 
