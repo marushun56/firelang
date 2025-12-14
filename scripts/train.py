@@ -419,7 +419,10 @@ def train(args):
                 if args.dim == 2:
                     """---------------- visualize ----------------"""
                     if args.model.lower() == "fireword":
-                        fig = visualize_fire(model, args.plot_words, tokenizer=viz_tokenizer)
+                        if args.lang in ["ja", "both"]:
+                            fig = visualize_fire_ja(model, args.plot_words, tokenizer=viz_tokenizer)
+                        else:
+                            fig = visualize_fire(model, args.plot_words, tokenizer=viz_tokenizer)
                     else:
                         raise ValueError(args.model)
                     img = wandb.Image(_fig2array(fig))
@@ -501,7 +504,7 @@ def _fig2array(fig):
     img = data.reshape((int(h), int(w), -1))
     return img
 
-
+from matplotlib.lines import Line2D
 @torch.no_grad()
 def visualize_fire(model: FireWord, words: List[str], r: float = 4, tokenizer=None):
     
@@ -624,6 +627,135 @@ def visualize_fire(model: FireWord, words: List[str], r: float = 4, tokenizer=No
     return fig
 
 
+@torch.no_grad()
+def visualize_fire_ja(model: FireWord, words: List[str], r: float = 4, tokenizer=None):
+    
+    # Prepare data for plotting
+    plot_data = [] # List of (word_label, list of (pos_flat, ws_flat, token_str))
+    
+    s2i = model.vocab.s2i
+    unk = model.vocab.unk if hasattr(model.vocab, 'unk') else '<unk>'
+    
+    device = next(model.parameters()).device
+
+    for w in words:
+        if tokenizer:
+            tokens = tokenizer(w)
+        else:
+            tokens = [w]
+            
+        # Filter tokens
+        valid_tokens_info = []
+        for t in tokens:
+            if t in s2i:
+                valid_tokens_info.append(t)
+            else:
+                if unk in s2i:
+                    valid_tokens_info.append(unk)
+        
+        if not valid_tokens_info:
+            logger.warning(f"Word '{w}' (tokens: {tokens}) has no valid tokens in vocab.")
+            continue
+            
+        word_tokens_data = []
+        for t in valid_tokens_info:
+            ft = model[[t]]
+            measure = ft.measures
+            pos = measure.get_x() # (1, n, dim)
+            if isinstance(pos, torch.Tensor):
+                pos = pos.to(device)
+
+            if isinstance(measure.m, float):
+                ws = torch.ones(pos.shape[0], pos.shape[1], dtype=pos.dtype, device=pos.device) * measure.m
+            else:
+                ws = measure.m.abs().to(device)
+             
+            # Flatten
+            pos_flat = pos.reshape(-1, pos.shape[-1])
+            ws_flat = ws.reshape(-1)
+            
+            word_tokens_data.append((pos_flat, ws_flat, t))
+        
+        plot_data.append((w, word_tokens_data))
+
+    if not plot_data:
+        logger.warning("No data to plot.")
+        return plt.figure()
+
+    # Calculate limits
+    all_pos_list = []
+    for _, tokens_data in plot_data:
+        for pos, _, _ in tokens_data:
+            all_pos_list.append(pos)
+            
+    all_pos = torch.cat(all_pos_list, dim=0)
+    
+    xmax = max(r, all_pos[:, 0].max().item())
+    xmin = min(-r, all_pos[:, 0].min().item())
+    ymax = max(r, all_pos[:, 1].max().item())
+    ymin = min(-r, all_pos[:, 1].min().item())
+
+    # Ensure meshgrid is created on the same device as the model
+    xmesh = torch.linspace(xmin, xmax, 100, device=device)
+    ymesh = torch.linspace(ymin, ymax, 100, device=device)
+    xmesh, ymesh = torch.meshgrid(xmesh, ymesh)
+    
+    # Calculate field for the first word (phrase)
+    score = torch.zeros_like(xmesh, device=device)
+    
+    # Use the first word from plot_data
+    first_word_tokens = plot_data[0][1]
+    
+    for _, _, t in first_word_tokens:
+        tx, ty = xmesh, ymesh
+        score += model.field(t, tx, ty)
+
+    def _sigmoid(x):
+        return 1 / (1 + np.exp(-x))
+
+    colors = ["#370665", "#35589A", "#F14A16", "#FC9918"]
+    markers = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h"]
+    
+    fig, ax = plt.subplots(1, 1, figsize=(6, 5))
+    
+    # Move data back to CPU for plotting
+    xmesh, ymesh, score = list(map(lambda x: x.detach().cpu().numpy(), [xmesh, ymesh, score]))
+    
+    cont = ax.contourf(xmesh, ymesh, score)
+    handlers = []
+    legend_labels = []
+    
+    for i, (word_label, tokens_data) in enumerate(plot_data):
+        color = colors[i % len(colors)]
+        
+        h_word = None
+        
+        for j, (pos, ws, token_str) in enumerate(tokens_data):
+            marker = markers[j % len(markers)]
+            pos = pos.detach().cpu().numpy()
+            ws = ws.detach().cpu().numpy()
+            
+            for (x, y), w in zip(pos, ws):
+                (h,) = ax.plot(
+                    x,
+                    y,
+                    marker,
+                    color=color,
+                    markersize=_sigmoid(w) * 10,
+                    markeredgecolor="white",
+                )
+                if j == 0 and h_word is None:
+                    h_word = h
+        
+        if h_word:
+            handlers.append(h_word)
+            legend_labels.append(word_label)
+            
+    ax.legend(handlers, legend_labels)
+    fig.colorbar(cont)
+    return fig
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
 
@@ -631,6 +763,12 @@ def parse_arguments():
         if s not in {"False", "True"}:
             raise ValueError("Not a valid boolean string")
         return s == "True"
+    def parse_plot_words(s: str) -> List[str]:
+        # "行く,重い,言葉" -> ["行く","重い","言葉"]
+        # ついでに全角カンマも許容
+        s = s.replace("，", ",")
+        return [w.strip() for w in s.split(",") if w.strip()]
+
 
     # ----- experiment setting -----
     parser.add_argument(
@@ -777,7 +915,10 @@ def parse_arguments():
     parser.add_argument("--cpu", action="store_true", help="Use cpu rather than CUDA.")
     parser.add_argument("--savedir", type=str, default="./results/")
     parser.add_argument(
-        "--plot_words", type=list, default=["bank", "river", "ball"]
+        "--plot_words",
+        type=str,
+        default="bank,river,ball",
+        help='Comma-separated words, e.g. "行く,重い,言葉" or "bank,river,ball"',
     )
     parser.add_argument(
         "--benchmarks",
@@ -813,6 +954,7 @@ def parse_arguments():
                         help="Language for benchmarking: 'en' (English only), 'ja' (Japanese only), or 'both'")
 
     args = parser.parse_args()
+    args.plot_words = parse_plot_words(args.plot_words)
 
     if args.func_measure:
         args.func, args.measure = args.func_measure.split("@@")

@@ -460,23 +460,19 @@ def benchmark_word_similarity_ja(
                 x1: FireTensor = model.forward(ids1_tensor)  # (n1, ...)
                 x2: FireTensor = model.forward(ids2_tensor)  # (n2, ...)
                 
-                # Sum of funcs and measures for each word
-                # f1_sum = sum of all funcs in word1
-                f1_sum = x1.funcs.sum(dim=0, keepdim=True)  # (1, ...)
-                u1_sum = x1.measures.sum(dim=0)  # Sum measures
-                
-                f2_sum = x2.funcs.sum(dim=0, keepdim=True)  # (1, ...)
-                u2_sum = x2.measures.sum(dim=0)  # Sum measures
-                
-                # potential(w1, w2) = f1_sum * u2_sum + f2_sum * u1_sum
-                # Using integral for the potential calculation
-                pot_12 = u2_sum.integral(f1_sum) + u1_sum.integral(f2_sum)
+                # Calculate potential(w1, w2) using matmul for cross-similarity
+                # x1 @ x2 computes pairwise potentials between all morpheme pairs
+                # Result shape: (n1, n2)
+                cross_pot = x1 @ x2  # This computes all pairwise potentials
+                pot_12 = cross_pot.sum()  # Sum all pairwise potentials
                 
                 # potential(w1, w1) for normalization
-                pot_11 = u1_sum.integral(f1_sum) + u1_sum.integral(f1_sum)
+                self_pot_1 = x1 @ x1  # (n1, n1)
+                pot_11 = self_pot_1.sum()
                 
                 # potential(w2, w2) for normalization
-                pot_22 = u2_sum.integral(f2_sum) + u2_sum.integral(f2_sum)
+                self_pot_2 = x2 @ x2  # (n2, n2)
+                pot_22 = self_pot_2.sum()
                 
                 # similarity = pot_12 - 0.5 * pot_11 - 0.5 * pot_22
                 sim_raw = pot_12 - 0.5 * pot_11 - 0.5 * pot_22

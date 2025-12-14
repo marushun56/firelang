@@ -12,8 +12,8 @@ python -m scripts.train \
     --seed=0 \
     --accum_steps=10 \
     --func='MLPlanarDivFast(dim, 4).neg()' \
-    --measure='DiracMixture(dim, 1)' \
+    --measure='DiracMixture(dim, 4)' \
     --weight_decay=1e-6 \
-    --lang=both \
-    --plot_words="行く,重い,言葉" \
+    --lang=ja \
+    --plot_words="はし,前,うしろ" \
     --use_wandb
