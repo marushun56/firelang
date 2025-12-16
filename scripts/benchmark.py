@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy.stats import spearmanr
+from scripts.Spearman import Spearman
 import multiprocessing
 import tqdm
 from sklearn.decomposition import PCA
@@ -196,22 +197,22 @@ def load_word_benchmark(
         # カラム名を統一し、スコアを0~1に正規化
         dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
         dataset.columns = ["word1", "word2", "similarity"]
-        dataset["similarity"] = dataset["similarity"] / 10.0
+        dataset["similarity"] = dataset["similarity"]
     elif name == "score_adv_ja":
         dataset = pd.read_csv(f"{dirpath}/score_adv.csv").dropna()
         dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
         dataset.columns = ["word1", "word2", "similarity"]
-        dataset["similarity"] = dataset["similarity"] / 10.0
+        dataset["similarity"] = dataset["similarity"]
     elif name == "score_noun_ja":
         dataset = pd.read_csv(f"{dirpath}/score_noun.csv").dropna()
         dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
         dataset.columns = ["word1", "word2", "similarity"]
-        dataset["similarity"] = dataset["similarity"] / 10.0
+        dataset["similarity"] = dataset["similarity"]
     elif name == "score_verb_ja":
         dataset = pd.read_csv(f"{dirpath}/score_verb.csv").dropna()
         dataset = dataset[["word1", "word2", "mean(remove_extreme_annotator)"]]
         dataset.columns = ["word1", "word2", "similarity"]
-        dataset["similarity"] = dataset["similarity"] / 10.0    
+        dataset["similarity"] = dataset["similarity"]    
     else:
         return NotImplementedError
 
@@ -236,12 +237,13 @@ def load_all_word_benchmarks(dirpath=DEFAULT_WORDSIM_DIR, lower=True):
     return benchmarks
 
 # 日本語用品詞フィルタ付きトークナイザを作成するヘルパー関数
-def create_ja_tokenizer_with_pos_filter(allowed_pos=None):
+def create_ja_tokenizer_with_pos_filter(allowed_pos=None, to_hiragana=False):
     """
     品詞フィルタ付き日本語トークナイザを作成する。
     
     Args:
         allowed_pos: 許可する品詞のセット。デフォルトは動詞、名詞、形容詞、形容動詞、副詞、助動詞。
+        to_hiragana: ひらがなに変換するかどうか。
     
     Returns:
         tokenizer関数
@@ -249,6 +251,9 @@ def create_ja_tokenizer_with_pos_filter(allowed_pos=None):
     if allowed_pos is None:
         allowed_pos = {'動詞', '名詞', '形容詞', '形容動詞', '副詞', '助動詞'}
     
+    def kata2hira(text):
+        return "".join([chr(ord(ch) - 96) if ("\u30a1" <= ch <= "\u30f6") else ch for ch in text])
+
     try:
         import MeCab
         tagger = MeCab.Tagger()
@@ -264,10 +269,14 @@ def create_ja_tokenizer_with_pos_filter(allowed_pos=None):
                 # 品詞は5番目（index 4）にある（例: "動詞-非自立可能"）
                 if len(parts) >= 5:
                     surface = parts[0]
+                    reading = parts[1]
                     pos_full = parts[4]  # 品詞情報
                     pos = pos_full.split('-')[0]  # 最初の品詞だけ取得
                     if pos in allowed_pos:
-                        tokens.append(surface)
+                        if to_hiragana:
+                            tokens.append(kata2hira(reading))
+                        else:
+                            tokens.append(surface)
             return tokens
         return ja_tokenizer
     except ImportError:
@@ -276,7 +285,7 @@ def create_ja_tokenizer_with_pos_filter(allowed_pos=None):
 
 
 # 日本語ベンチマーク用の関数追加
-def load_all_word_benchmarks_ja(dirpath=DEFAULT_WORDSIM_DIR_JA, lower=True, tokenizer: Callable = None):
+def load_all_word_benchmarks_ja(dirpath=DEFAULT_WORDSIM_DIR_JA, lower=True, tokenizer: Callable = None, to_hiragana=False):
     """
     日本語単語類似度ベンチマークをロードする。
     
@@ -284,9 +293,10 @@ def load_all_word_benchmarks_ja(dirpath=DEFAULT_WORDSIM_DIR_JA, lower=True, toke
         dirpath: ベンチマークデータのディレクトリパス
         lower: 小文字化するか（日本語では通常False）
         tokenizer: トークナイザ関数。Noneの場合は品詞フィルタ付きMeCabトークナイザを使用。
+        to_hiragana: ひらがなに変換するかどうか（tokenizerがNoneの場合のみ有効）
     """
     if tokenizer is None:
-        tokenizer = create_ja_tokenizer_with_pos_filter()
+        tokenizer = create_ja_tokenizer_with_pos_filter(to_hiragana=to_hiragana)
     
     benchmarks = {}
     for bname in ALL_WORDSIM_BENCHMARKS_JA:

@@ -1,0 +1,1 @@
+python -m scripts.evaluate --model_path /home/maruyama/projectB/firelang/results/0PZW2SR3 --lang ja

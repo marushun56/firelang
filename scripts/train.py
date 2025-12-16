@@ -179,29 +179,60 @@ def train(args):
         # 日本語の場合はコーパスと同じトークナイザーを使う（品詞フィルタ付き）
         # 許可する品詞（動詞、名詞、形容詞、形容動詞、副詞、助動詞）
         ALLOWED_POS_JA = {'動詞', '名詞', '形容詞', '形容動詞', '副詞', '助動詞'}
+        
+        def kata2hira(text):
+            return "".join([chr(ord(ch) - 96) if ("\u30a1" <= ch <= "\u30f6") else ch for ch in text])
+
         try:
             import MeCab
-            tagger = MeCab.Tagger()
-            def ja_tokenizer(text):
-                tokens = []
-                parsed = tagger.parse(text)
-                for line in parsed.strip().split('\n'):
-                    if line == 'EOS' or not line:
-                        continue
-                    parts = line.split('\t')
-                    # UniDic形式: 表層形, 読み1, 読み2, 原形, 品詞, ...
-                    # 品詞は5番目（index 4）にある
-                    if len(parts) >= 5:
-                        surface = parts[0]
-                        pos_full = parts[4]  # 品詞情報
-                        pos = pos_full.split('-')[0]  # 最初の品詞だけ取得
-                        if pos in ALLOWED_POS_JA:
-                            tokens.append(surface)
-                return tokens
+            # Try to initialize MeCab with unidic-lite if default fails
+            try:
+                tagger = MeCab.Tagger()
+            except RuntimeError:
+                import unidic_lite
+                dic_dir = unidic_lite.DICDIR
+                tagger = MeCab.Tagger(f"-d {dic_dir}")
+
+            def create_smart_tokenizer(vocab):
+                # Determine vocab interface
+                if hasattr(vocab, 's2i'):
+                    s2i = vocab.s2i
+                elif hasattr(vocab, 'stoi'):
+                    s2i = vocab.stoi
+                else:
+                    s2i = {} 
+                
+                def ja_tokenizer(text):
+                    tokens = []
+                    parsed = tagger.parse(text)
+                    for line in parsed.strip().split('\n'):
+                        if line == 'EOS' or not line:
+                            continue
+                        parts = line.split('\t')
+                        if len(parts) >= 5:
+                            surface = parts[0]
+                            reading = parts[1]
+                            pos_full = parts[4]
+                            pos = pos_full.split('-')[0]
+                            if pos in ALLOWED_POS_JA:
+                                if args.ja_hiragana:
+                                    token_candidate = kata2hira(reading)
+                                    if token_candidate in s2i:
+                                        tokens.append(token_candidate)
+                                    else:
+                                        tokens.extend(list(token_candidate))
+                                else:
+                                    tokens.append(surface)
+                    return tokens
+                return ja_tokenizer
         except ImportError:
             logger.warning("MeCab not available, using character-level tokenization")
-            def ja_tokenizer(text):
-                return list(text)
+            def create_smart_tokenizer(vocab):
+                def ja_tokenizer(text):
+                    return list(text)
+                return ja_tokenizer
+        
+        ja_tokenizer = create_smart_tokenizer(model.vocab)
         viz_tokenizer = ja_tokenizer
         benchmark_kwargs = {"lower": args.benchmark_lower, "tokenizer": ja_tokenizer}
     elif args.lang == "both":
@@ -212,29 +243,60 @@ def train(args):
         # 日本語用に適切なトークナイザーを使用（英語と同じ）
         # 許可する品詞（動詞、名詞、形容詞、形容動詞、副詞、助動詞）
         ALLOWED_POS_JA = {'動詞', '名詞', '形容詞', '形容動詞', '副詞', '助動詞'}
+        
+        def kata2hira(text):
+            return "".join([chr(ord(ch) - 96) if ("\u30a1" <= ch <= "\u30f6") else ch for ch in text])
+
         try:
             import MeCab
-            tagger = MeCab.Tagger()
-            def ja_tokenizer(text):
-                tokens = []
-                parsed = tagger.parse(text)
-                for line in parsed.strip().split('\n'):
-                    if line == 'EOS' or not line:
-                        continue
-                    parts = line.split('\t')
-                    # UniDic形式: 表層形, 読み1, 読み2, 原形, 品詞, ...
-                    # 品詞は5番目（index 4）にある
-                    if len(parts) >= 5:
-                        surface = parts[0]
-                        pos_full = parts[4]  # 品詞情報
-                        pos = pos_full.split('-')[0]  # 最初の品詞だけ取得
-                        if pos in ALLOWED_POS_JA:
-                            tokens.append(surface)
-                return tokens
+            # Try to initialize MeCab with unidic-lite if default fails
+            try:
+                tagger = MeCab.Tagger()
+            except RuntimeError:
+                import unidic_lite
+                dic_dir = unidic_lite.DICDIR
+                tagger = MeCab.Tagger(f"-d {dic_dir}")
+
+            def create_smart_tokenizer(vocab):
+                # Determine vocab interface
+                if hasattr(vocab, 's2i'):
+                    s2i = vocab.s2i
+                elif hasattr(vocab, 'stoi'):
+                    s2i = vocab.stoi
+                else:
+                    s2i = {} 
+                
+                def ja_tokenizer(text):
+                    tokens = []
+                    parsed = tagger.parse(text)
+                    for line in parsed.strip().split('\n'):
+                        if line == 'EOS' or not line:
+                            continue
+                        parts = line.split('\t')
+                        if len(parts) >= 5:
+                            surface = parts[0]
+                            reading = parts[1]
+                            pos_full = parts[4]
+                            pos = pos_full.split('-')[0]
+                            if pos in ALLOWED_POS_JA:
+                                if args.ja_hiragana:
+                                    token_candidate = kata2hira(reading)
+                                    if token_candidate in s2i:
+                                        tokens.append(token_candidate)
+                                    else:
+                                        tokens.extend(list(token_candidate))
+                                else:
+                                    tokens.append(surface)
+                    return tokens
+                return ja_tokenizer
         except ImportError:
             logger.warning("MeCab not available for Japanese benchmark, using character-level")
-            def ja_tokenizer(text):
-                return list(text)
+            def create_smart_tokenizer(vocab):
+                def ja_tokenizer(text):
+                    return list(text)
+                return ja_tokenizer
+        
+        ja_tokenizer = create_smart_tokenizer(model.vocab)
         viz_tokenizer = ja_tokenizer
         
         benchmarks_ja = load_all_word_benchmarks_ja(
@@ -952,6 +1014,8 @@ def parse_arguments():
     parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--lang", type=str, default="en", choices=["en", "ja", "both"],
                         help="Language for benchmarking: 'en' (English only), 'ja' (Japanese only), or 'both'")
+    parser.add_argument("--ja_hiragana", action="store_true",
+                        help="Convert Japanese tokens to Hiragana (using reading)")
 
     args = parser.parse_args()
     args.plot_words = parse_plot_words(args.plot_words)

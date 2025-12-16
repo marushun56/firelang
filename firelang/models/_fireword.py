@@ -285,6 +285,9 @@ class FireWord(FireEmbedding):
         with open(f"{dirpath}/vocab.json", 'r') as f:
             vocab_data = json.load(f)
         
+        # Convert i2s keys to integers
+        i2s = {int(k): v for k, v in vocab_data['i2s'].items()}
+        
         # Create SimpleVocab-like object
         class SimpleVocab:
             def __init__(self, s2i, i2s, special_name2i=None):
@@ -297,7 +300,7 @@ class FireWord(FireEmbedding):
         
         vocab = SimpleVocab(
             s2i=vocab_data['s2i'],
-            i2s=vocab_data['i2s'],
+            i2s=i2s,
             special_name2i=vocab_data.get('special_name2i', {})
         )
 

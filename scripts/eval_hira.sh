@@ -1,0 +1,1 @@
+python -m scripts.evaluate --model_path /home/maruyama/projectB/firelang/results/9XSFUTBC --lang ja --ja_hiragana
